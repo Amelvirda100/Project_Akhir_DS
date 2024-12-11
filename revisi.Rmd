@@ -1,0 +1,755 @@
+---
+title: "Revisi_Projek_Akhir"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-12-8"
+---
+
+latar belakang :
+Kami menganalisis data terkait properti di Daerah Istimewa Yogyakarta (DIY). Proyek ini melibatkan eksplorasi data properti seperti harga, ukuran tanah, ukuran bangunan, serta klaim Dekat Fasilitas. Proyek ini bertujuan untuk memahami faktor-faktor yang memengaruhi harga properti dan bagaimana klaim seperti Dekat Fasilitas dapat digunakan sebagai strategi pemasaran. Pendekatan data science digunakan untuk membersihkan, menganalisis, dan memvisualisasikan data, dengan harapan menghasilkan wawasan yang dapat diaplikasikan dalam pasar properti.
+
+Hipotesis
+
+    1. Properti dengan klaim Dekat Fasilitas memiliki harga yang lebih tinggi dibandingkan properti tanpa klaim tersebut.
+    2. Lebar tanah, lebar bangunan, jumlah kamar tidur, dan kamar mandi memiliki hubungan positif dengan harga properti.
+    
+    Preview dataset : Dataset yang digunakan memiliki 10 kolom yaitu Judul, Harga, Lokasi, Kamar, Wc,
+Parkir_kendaraan, Lebar_tanah, Lebar_bangunan, Dekripsi, Keyword.
+
+saya ganti dari regresi linear menggunakan awalnya random forrest, tapi akurasi masih jelek, lalu ganti final(saat ini) ke xgboost, lumayan berkurang tapi tetap jelek
+
+dan ada beberapa penambahan visualisasi hanya untuk mengecek outlier masaing2 variabel
+
+
+###import library
+```{r}
+library(xgboost) 
+library(tidyverse)
+library(tidymodels)
+library(here)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(textclean)
+library(stringr)
+```
+
+
+###import dataset
+```{r}
+# Baca file CSV
+data <- read.csv("DIY_CSV.csv")
+
+# Menampilkan struktur data untuk memeriksa kolom dan tipe data
+str(data)
+```
+
+
+
+###data preparation
+
+```{r}
+#ubah data kosong/spasi tanpa ket NA menjadi NA
+data$Lebar_bangunan[data$Lebar_bangunan == ""] <- NA
+data$Lebar_tanah[data$Lebar_tanah == ""] <- NA
+data$Harga[data$Lebar_bangunan == ""] <- NA
+data$Kamar[data$Kamar == ""] <- NA
+data$Wc[data$Wc == ""] <- NA
+data$Keyword[data$Keyword == ""] <- NA
+
+# Cek jumlah NA pada tiap kolom
+hitung_NA <- sapply(data, function(x) sum(is.na(x)))
+
+# Menampilkan jumlah NA per kolom
+print(hitung_NA)
+
+```
+
+
+```{r}
+# Menghapus baris dengan NA
+data_clean <- data %>%
+  drop_na() 
+
+# Anggap data adalah dataframe yang sudah ada
+data_clean <- data %>%
+  mutate(
+    Harga = str_replace_all(Harga, "[^0-9a-zA-Z]", ""),  # Menghapus karakter selain angka dan huruf
+    Harga = ifelse(str_detect(Harga, "Juta"), 
+                   as.numeric(str_replace_all(Harga, "[^0-9]", "")) * 1e6, 
+                   ifelse(str_detect(Harga, "Miliar"), 
+                          as.numeric(str_replace_all(Harga, "[^0-9]", "")) * 1e9, 
+                          as.numeric(str_replace_all(Harga, "[^0-9]", "")))),
+    Lebar_tanah = as.numeric(str_replace_all(Lebar_tanah, "[^0-9]", "")),
+    Lebar_bangunan = as.numeric(str_replace_all(Lebar_bangunan, "[^0-9]", "")),
+    Dekat_fasilitas = ifelse(grepl("dekat", tolower(Keyword)) |
+                               grepl("dekat", tolower(Deksripsi)),
+                             1, 0)
+  ) %>%
+  rename(
+    Deskripsi = Deksripsi  # Mengganti nama kolom Deksripsi menjadi deskripsi
+  )
+
+# Nonaktifkan notasi ilmiah (biar kelihatan 0-nya tanpa notasi e+12)
+options(scipen = 999)
+
+# Melihat hasil
+print(data_clean)
+
+```
+
+
+```{r}
+# Konversi tipe data
+data_clean$Harga <- as.numeric(data_clean$Harga)
+data_clean$Kamar <- as.numeric(data_clean$Kamar)
+data_clean$Wc <- as.numeric(data_clean$Wc)
+data_clean$Parkir_kendaraan <- as.numeric(data_clean$Parkir_kendaraan)
+data_clean$Lebar_tanah <- as.numeric(data_clean$Lebar_tanah)
+data_clean$Lebar_bangunan <- as.numeric(data_clean$Lebar_bangunan)
+data_clean$Dekat_fasilitas <- as.numeric(data_clean$Dekat_fasilitas)
+
+
+# Menampilkan struktur data untuk memeriksa kolom dan tipe data
+str(data_clean)
+```
+
+
+```{r}
+# Mengecek apakah ada baris yang terduplikasi
+duplicated_data <- duplicated(data_clean[, c("Judul")])
+
+# Menampilkan baris mana saja yang terduplikasi
+data[duplicated_data, ]
+
+# Jumlah baris yang terduplikasi
+sum(duplicated_data)
+
+
+```
+
+
+```{r}
+# Menghapus baris yang terduplikasi berdasarkan kolom "Judul" lalu dimasukkan ke dataaset baru bernama "data_nonduplikat"
+data_nonduplikat <- data_clean %>% distinct(Judul, .keep_all = TRUE)
+
+# Mengecek apakah ada baris yang terduplikasi lagi setelah pembersihan dengan distinct
+any_duplicated <- anyDuplicated(data_nonduplikat[, c("Judul")])
+
+# Menampilkan baris mana saja yang terduplikasi
+data[any_duplicated, ]
+
+# Menampilkan Jumlah baris yang terduplikasi
+sum(any_duplicated)
+
+# Lihat hasilnya
+head(data_clean)
+
+```
+
+
+```{r}
+# Menghapus baris dengan nilai NA
+data_clean <- drop_na(data_nonduplikat)
+
+```
+
+```{r}
+# Cek lagi untuk memastikan tidak ada data NA lagi
+hitung_NA <- sapply(data_clean, function(x) sum(is.na(x)))
+
+# Menampilkan jumlah NA per kolom
+print(hitung_NA)
+
+```
+###mengatasi outlier
+```{r}
+# Menghitung Q1, Q3, dan IQR
+Q1 <- quantile(data_clean$Harga, 0.25, na.rm = TRUE)
+Q3 <- quantile(data_clean$Harga, 0.75, na.rm = TRUE)
+IQR <- Q3 - Q1
+
+# Menghitung batas bawah dan atas
+batas_bawah <- Q1 - 3* IQR
+batas_atas <- Q3 + 3* IQR
+
+# Data dengan outlier
+data_outliers <- data_clean %>%
+  filter(Harga < batas_bawah | Harga > batas_atas)
+
+# Menampilkan data outlier
+print(data_outliers)
+
+# Data tanpa outlier
+data_tanpa_outliers <- data_clean %>%
+  filter(Harga >= batas_bawah & Harga <= batas_atas)
+
+# Periksa dimensi data setelah membuang outlier
+dim(data_tanpa_outliers)
+
+# Memperbarui data_clean dengan data tanpa outlier
+data_clean <- data_tanpa_outliers
+
+# Menghapus outlier harga
+data_clean <- data_clean %>%
+  filter(Harga >= 300e6 & Harga <= 800e6)  # 50e9 setara dengan 50 miliar
+
+# Melihat hasil setelah pemfilteran
+head(data_clean)
+
+# Mengecek jumlah data setelah pemfilteran
+print(paste("Jumlah data setelah pemfilteran:", nrow(data_clean)))
+
+
+
+```
+
+
+
+```{r}
+# Fungsi untuk menangani outlier
+handle_outliers <- function(data, column) {
+  Q1 <- quantile(data[[column]], 0.25, na.rm = TRUE)
+  Q3 <- quantile(data[[column]], 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  
+  # Menentukan batas bawah dan atas
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  # Menghapus data yang berada di luar batas
+  data <- data %>%
+    filter(data[[column]] >= lower_bound & data[[column]] <= upper_bound)
+  
+  return(data)
+}
+
+# Mengatasi outlier untuk variabel parkir
+#data_clean <- handle_outliers(data_clean, "Parkir_kendaraan")
+
+# Mengatasi outlier untuk variabel wc
+data_clean <- handle_outliers(data_clean, "Wc")
+
+# Mengatasi outlier untuk variabel kamar
+data_clean <- handle_outliers(data_clean, "Kamar")
+
+# Mengatasi outlier untuk variabel lebar bangunan
+data_clean <- handle_outliers(data_clean, "Lebar_bangunan")
+
+# Mengatasi outlier untuk variabel lebar tanah
+data_clean <- handle_outliers(data_clean, "Lebar_tanah")
+
+# Cek data setelah proses
+print(dim(data_clean))
+
+```
+
+
+
+```{r}
+# Perhitungan tanpa format() untuk menjaga tipe data numerik
+summary_stats <- data_clean %>%
+  group_by(Dekat_fasilitas) %>%
+  summarise(
+    Avg_Harga = mean(Harga, na.rm = TRUE),
+    Median_Harga = median(Harga, na.rm = TRUE),
+    Count = n()
+  )
+
+# Grafik Bar
+ggplot(summary_stats, aes(x = Dekat_fasilitas, y = Avg_Harga, fill = Dekat_fasilitas)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Rata-Rata Harga Berdasarkan Kategori 'Dekat Fasilitas'",
+    x = "Dekat Fasilitas",
+    y = "Rata-Rata Harga (Rp)"
+  ) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  theme_minimal()
+
+# Data untuk Pie Chart
+pie_data <- summary_stats %>%
+  mutate(Percentage = Count / sum(Count) * 100)
+
+# Grafik Pie
+ggplot(pie_data, aes(x = "", y = Percentage, fill = Dekat_fasilitas)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0) +
+  labs(
+    title = "Distribusi Properti Berdasarkan Kategori 'Dekat Fasilitas'",
+    fill = "Dekat Fasilitas"
+  ) +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+print(summary_stats)
+
+```
+
+
+
+###liat macam2 kata dekat dengan fasilitas apa saja
+
+```{r}
+# Visualisasi distribusi Harga Properti
+ggplot(data_clean, aes(x = Harga)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  labs(title = "Distribusi Harga Properti", x = "Harga (IDR)", y = "Frekuensi") +
+  theme_minimal()
+
+
+```
+
+
+
+```{r}
+# Boxplot Harga berdasarkan Dekat Fasilitas
+ggplot(data_clean, aes(x = as.factor(Dekat_fasilitas), y = Harga)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Boxplot Harga Berdasarkan Dekat Fasilitas", x = "Dekat Fasilitas (0 = Tidak, 1 = Dekat)", y = "Harga (IDR)") +
+  theme_minimal()
+
+```
+
+```{r}
+# Korelasi antara variabel numerik dan Harga
+numerical_vars <- data_clean %>% select(Kamar, Wc, Parkir_kendaraan, Lebar_tanah, Lebar_bangunan, Dekat_fasilitas, Harga)
+correlation_matrix <- cor(numerical_vars, use = "complete.obs")
+print(correlation_matrix)
+
+# Heatmap korelasi
+library(reshape2)
+correlation_melt <- melt(correlation_matrix)
+ggplot(correlation_melt, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  labs(title = "Korelasi Variabel Numerik", x = "", y = "") +
+  theme_minimal()
+
+```
+
+```{r}
+# Melihat nilai maksimum dan minimum untuk masing-masing variabel
+max_lebar_tanah <- max(data_clean$Lebar_tanah, na.rm = TRUE)
+min_lebar_tanah <- min(data_clean$Lebar_tanah, na.rm = TRUE)
+
+max_lebar_bangunan <- max(data_clean$Lebar_bangunan, na.rm = TRUE)
+min_lebar_bangunan <- min(data_clean$Lebar_bangunan, na.rm = TRUE)
+
+max_wc <- max(data_clean$Wc, na.rm = TRUE)
+min_wc <- min(data_clean$Wc, na.rm = TRUE)
+
+max_kamar <- max(data_clean$Kamar, na.rm = TRUE)
+min_kamar <- min(data_clean$Kamar, na.rm = TRUE)
+
+max_parkir <- max(data_clean$Parkir_kendaraan, na.rm = TRUE)
+min_parkir <- min(data_clean$Parkir_kendaraan, na.rm = TRUE)
+
+# Menampilkan hasil
+cat("Lebar Tanah: Maks =", max_lebar_tanah, ", Min =", min_lebar_tanah, "\n")
+cat("Lebar Bangunan: Maks =", max_lebar_bangunan, ", Min =", min_lebar_bangunan, "\n")
+cat("WC: Maks =", max_wc, ", Min =", min_wc, "\n")
+cat("Kamar: Maks =", max_kamar, ", Min =", min_kamar, "\n")
+cat("Parkir Kendaraan: Maks =", max_parkir, ", Min =", min_parkir, "\n")
+
+```
+
+
+```{r}
+# Scatter plot untuk Lebar Tanah vs Harga
+ggplot(data_clean, aes(x = Lebar_tanah, y = Harga)) +
+  geom_point(alpha = 0.6, color = "purple") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Hubungan antara Lebar Tanah dan Harga Properti", 
+       x = "Lebar Tanah (m²)", 
+       y = "Harga (IDR)") +
+  theme_minimal()
+
+# Scatter plot untuk Lebar Bangunan vs Harga
+ggplot(data_clean, aes(x = Lebar_bangunan, y = Harga)) +
+  geom_point(alpha = 0.6, color = "brown") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Hubungan antara Lebar Bangunan dan Harga Properti", 
+       x = "Lebar Bangunan (m²)", 
+       y = "Harga (IDR)") +
+  theme_minimal()
+
+# Scatter plot untuk variabel Jumlah Kamar vs Harga
+ggplot(data_clean, aes(x = Kamar, y = Harga)) +
+  geom_point(alpha = 0.6, color = "green") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Hubungan antara Jumlah Kamar dan Harga Properti", 
+       x = "Jumlah Kamar", 
+       y = "Harga (IDR)") +
+  coord_cartesian(ylim = c(0, 1e9)) +  # Batasi harga maksimum untuk fokus
+  theme_minimal()
+
+# Scatter plot untuk variabel WC vs Harga dengan skala log
+ggplot(data_clean, aes(x = Wc, y = Harga)) +
+  geom_point(alpha = 0.6, color = "orange") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Hubungan antara Jumlah WC dan Harga Properti (Log Scale)", 
+       x = "Jumlah WC", 
+       y = "Harga (IDR)") +
+  scale_x_continuous(breaks = seq(0, max(data_clean$Wc, na.rm = TRUE), by = 1)) +
+  scale_y_log10(labels = scales::comma) +  # Menggunakan skala log untuk harga
+  theme_minimal()
+
+# Scatter plot untuk variabel Parkir Kendaraan vs Harga dengan skala log
+ggplot(data_clean, aes(x = Parkir_kendaraan, y = Harga)) +
+  geom_point(alpha = 0.6, color = "blue") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  labs(title = "Hubungan antara Jumlah Parkir dan Harga Properti (Log Scale)", 
+       x = "Jumlah Parkir", 
+       y = "Harga (IDR)") +
+  scale_x_continuous(breaks = seq(0, max(data_clean$Parkir_kendaraan, na.rm = TRUE), by = 1)) +
+  scale_y_log10(labels = scales::comma) +  # Menggunakan skala log untuk harga
+  theme_minimal()
+
+
+# Scatter plot untuk variabel Dekat Fasilitas vs Harga dengan boxplot
+ggplot(data_clean, aes(x = factor(Dekat_fasilitas), y = Harga)) +
+  geom_boxplot(fill = "pink", alpha = 0.5) +
+  labs(x = "Dekat Fasilitas (0 = Tidak, 1 = Dekat)", 
+       y = "Harga Properti (IDR)", 
+       title = "Pengaruh Fasilitas Terdekat terhadap Harga Properti") +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal()
+
+
+```
+
+```{r}
+# Histogram Harga
+ggplot(data_clean, aes(x = Harga, fill = factor(Dekat_fasilitas))) +
+  geom_histogram(bins = 30, position = "dodge", alpha = 0.7) +
+  scale_fill_manual(values = c("#FF9999", "#99CCFF"),
+                    labels = c("Tidak Dekat Fasilitas", "Dekat Fasilitas")) +
+  labs(title = "Histogram Harga Properti",
+       x = "Harga",
+       y = "Frekuensi",
+       fill = "Kategori") +
+  theme_minimal()
+```
+
+
+
+```{r}
+# Boxplot for 'Kamar' (Number of Rooms)
+ggplot(data_clean, aes(x = "", y = Kamar)) + 
+  geom_boxplot(fill = "skyblue", color = "black") +  # Mengatur warna boxplot
+  labs(title = "Boxplot of Kamar (Number of Rooms)", y = "Number of Rooms") +
+  theme_minimal() +
+  coord_cartesian(ylim = c(0, 10))  # Menyesuaikan rentang untuk sumbu Y
+
+# Boxplot for 'Wc' (Number of Bathrooms)
+ggplot(data_clean, aes(x = "", y = Wc)) + 
+  geom_boxplot(fill = "lightcoral", color = "black") +  # Mengatur warna boxplot
+  labs(title = "Boxplot of Wc (Number of Bathrooms)", y = "Number of Bathrooms") +
+  theme_minimal() +
+  coord_cartesian(ylim = c(0, 5))  # Menyesuaikan rentang untuk sumbu Y
+
+# Boxplot for 'Parkir_kendaraan' (Number of Parking Spaces)
+ggplot(data_clean, aes(x = "", y = Parkir_kendaraan)) + 
+  geom_boxplot(fill = "lightgreen", color = "black") +  # Mengatur warna boxplot
+  labs(title = "Boxplot of Parkir_kendaraan (Number of Parking Spaces)", y = "Number of Parking Spaces") +
+  theme_minimal() +
+  coord_cartesian(ylim = c(0, 5))  # Menyesuaikan rentang untuk sumbu Y
+
+# Boxplot for Lebar_tanah (Land Width) dengan skala log
+ggplot(data_clean, aes(x = "", y = Lebar_tanah)) + 
+  geom_boxplot(fill = "skyblue", color = "black") + 
+  labs(title = "Boxplot Lebar Tanah", y = "Lebar Tanah (m²)") + 
+  theme_minimal() +
+  scale_y_continuous(
+    trans = "log10",  # Skala logaritmik
+    breaks = scales::trans_breaks("log10", function(x) 10^x),  # Atur posisi label
+    labels = scales::comma  # Format label menjadi angka dengan koma
+  ) +
+  coord_cartesian(ylim = c(22, 1.2e6))  # Rentang Y disesuaikan
+
+# Boxplot for Lebar_bangunan (Building Width) dengan skala log
+ggplot(data_clean, aes(x = "", y = Lebar_bangunan)) + 
+  geom_boxplot(fill = "pink", color = "black") + 
+  labs(title = "Boxplot Lebar Bangunan", y = "Lebar Bangunan (m²)") + 
+  theme_minimal() +
+  scale_y_continuous(
+    trans = "log10",  # Skala logaritmik
+    breaks = scales::trans_breaks("log10", function(x) 10^x),  # Atur posisi label
+    labels = scales::comma  # Format label menjadi angka dengan koma
+  ) +
+  coord_cartesian(ylim = c(1, 1.2e6))  # Rentang Y disesuaikan
+
+
+```
+
+
+```{r}
+# Korelasi antara variabel numerik dan Harga
+numerical_vars <- data_clean %>% select(Kamar, Dekat_fasilitas, Wc, Parkir_kendaraan, Lebar_tanah, Lebar_bangunan, Harga)
+correlation_matrix <- cor(numerical_vars, use = "complete.obs")
+print(correlation_matrix)
+
+# Heatmap korelasi
+library(reshape2)
+correlation_melt <- melt(correlation_matrix)
+ggplot(correlation_melt, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  labs(title = "Korelasi Variabel Numerik", x = "", y = "") +
+  theme_minimal()
+```
+
+```{r}
+#scalling data karena rentang tiap variabel saling berjauhan
+
+data_clean_scaled <- data_clean %>%
+  select(Kamar, Wc, Lebar_bangunan, Lebar_tanah) %>%  # Memilih hanya kolom numerik yang relevan untuk scaling
+  scale() %>%
+  as.data.frame()  # Mengubah hasil scaling menjadi data frame
+
+# Menggabungkan kembali dengan kolom yang tidak diskalakan
+data_clean_scaled <- cbind(data_clean %>% select(-Kamar, -Wc, -Lebar_bangunan, -Lebar_tanah), data_clean_scaled)
+
+```
+
+
+
+
+```{r}
+# Cek struktur data setelah scaling
+str(data_clean_scaled)
+```
+
+
+```{r}
+
+# Pemisahan data untuk pelatihan dan pengujian
+set.seed(123)  # Untuk reproduktifitas
+data_split <- initial_split(data_clean_scaled, prop = 0.8)
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+```
+
+```{r}
+# Menampilkan jumlah data pada train_data dan test_data
+cat("Jumlah data pada train_data:", nrow(train_data), "\n")
+cat("Jumlah data pada test_data:", nrow(test_data), "\n")
+
+```
+
+
+###modelling
+
+```{r}
+# Convert data to matrix format, which is required by xgboost
+train_matrix <- as.matrix(train_data %>% select(Kamar, Wc, Lebar_bangunan, Lebar_tanah))
+test_matrix  <- as.matrix(test_data %>% select(Kamar, Wc, Lebar_bangunan, Lebar_tanah))
+
+# Convert target variable (Harga) to numeric
+train_target <- train_data$Harga
+test_target  <- test_data$Harga
+
+# Train an XGBoost model
+xgb_model <- xgboost(
+  data = train_matrix,  # Features
+  label = train_target, # Target variable
+  objective = "reg:squarederror",  # Regression task
+  nrounds = 100,        # Number of boosting rounds
+  max_depth = 6,        # Maximum depth of the trees
+  eta = 0.1,            # Learning rate
+  verbose = 1           # Print out progress
+)
+
+# Print the model summary
+print(xgb_model)
+
+
+```
+
+
+```{r}
+# Predictions on the test data
+xgb_predictions <- predict(xgb_model, test_matrix)
+
+# Actual vs Predicted
+actual_vs_predicted_xgb <- data.frame(Actual = test_target, Predicted = xgb_predictions)
+
+# Show the first few results
+print(head(actual_vs_predicted_xgb))
+
+```
+
+        
+```{r}
+# Calculate RMSE for XGBoost model
+rmse_xgb <- sqrt(mean((actual_vs_predicted_xgb$Actual - actual_vs_predicted_xgb$Predicted)^2))
+print(paste("RMSE for XGBoost: ", rmse_xgb))
+
+```
+
+
+```{r}
+
+library(shiny)
+
+# Define UI
+
+ui <- fluidPage(
+
+  titlePanel("Analisis Harga Properti di Yogyakarta"),
+
+  
+
+  sidebarLayout(
+
+    sidebarPanel(
+
+      selectInput("location", "Pilih Lokasi:",
+
+                  choices = unique(data_clean$Lokasi), 
+
+                  selected = unique(data_clean$Lokasi)[1]),
+
+      checkboxInput("show_summary", "Tampilkan Ringkasan Statistik", value = TRUE)
+
+    ),
+
+    
+
+    mainPanel(
+
+      tabsetPanel(
+
+        tabPanel("Ringkasan Statistik", 
+
+                 tableOutput("summary_table")),
+
+        tabPanel("Visualisasi Harga",
+
+                 plotOutput("price_plot")),
+
+        tabPanel("Korelasi",
+
+                 plotOutput("correlation_plot"))
+
+      )
+
+    )
+
+  )
+
+)
+
+
+# Define server logic
+
+server <- function(input, output) {
+
+  
+
+  # Ringkasan statistik berdasarkan lokasi yang dipilih
+
+  output$summary_table <- renderTable({
+
+    filtered_data <- data_clean %>% filter(Lokasi == input$location)
+
+    
+
+    if (input$show_summary) {
+
+      summary_stats <- filtered_data %>%
+
+        summarise(
+
+          Avg_Harga = mean(Harga, na.rm = TRUE),
+
+          Median_Harga = median(Harga, na.rm = TRUE),
+
+          Jumlah_Properti = n()
+
+        )
+
+      return(summary_stats)
+
+    }
+
+  })
+
+  
+
+  # Visualisasi harga berdasarkan lokasi
+
+  output$price_plot <- renderPlot({
+
+    filtered_data <- data_clean %>% filter(Lokasi == input$location)
+
+    
+
+    ggplot(filtered_data, aes(x = Harga)) +
+
+      geom_histogram(bins = 30, fill = "#69b3a2", alpha = 0.7) +
+
+      labs(title = paste("Distribusi Harga di", input$location),
+
+           x = "Harga (Rp)", 
+
+           y = "Frekuensi") +
+
+      theme_minimal()
+
+  })
+
+  
+
+  # Korelasi antara variabel numerik dan harga
+
+  output$correlation_plot <- renderPlot({
+
+    numerical_vars <- data_clean %>%
+
+      select(Kamar, Wc, Parkir_kendaraan, Lebar_tanah, Lebar_bangunan, Harga)
+
+    
+
+    correlation_matrix <- cor(numerical_vars, use = "complete.obs")
+
+    
+
+    # Heatmap korelasi
+
+    library(reshape2)
+
+    correlation_melt <- melt(correlation_matrix)
+
+    
+
+    ggplot(correlation_melt, aes(Var1, Var2, fill = value)) +
+
+      geom_tile(color = "white") +
+
+      scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+
+      labs(title = "Korelasi Variabel Numerik", x = "", y = "") +
+
+      theme_minimal()
+
+  })
+
+}
+
+
+# Run the application 
+
+shinyApp(ui = ui, server = server)
+```
+
+
+
+
+
